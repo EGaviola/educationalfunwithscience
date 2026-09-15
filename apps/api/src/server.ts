@@ -1,7 +1,8 @@
 import bcrypt from "bcryptjs";
 import cors from "cors";
 import "dotenv/config";
-import express, { type NextFunction, type Request, type Response } from "express";
+import express from "express";
+import rateLimit from "express-rate-limit";
 import { z } from "zod";
 import { AuthenticatedRequest, requireAuth, requireRole, signToken, type UserRole } from "./auth.js";
 import { labs, missions, standards } from "./content.js";
@@ -12,71 +13,21 @@ const port = Number(process.env.PORT ?? 4000);
 
 app.use(cors());
 app.use(express.json());
+const authRateLimit = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 25,
+  standardHeaders: "draft-8",
+  legacyHeaders: false,
+  message: { error: "Too many authentication requests. Please try again later." },
+});
 
-type RateLimitConfig = {
-  windowMs: number;
-  maxRequests: number;
-  message: string;
-};
-
-type RateLimitEntry = {
-  count: number;
-  resetAt: number;
-};
-
-const createRateLimit = ({ windowMs, maxRequests, message }: RateLimitConfig) => {
-  const entries = new Map<string, RateLimitEntry>();
-
-  return (req: Request, res: Response, next: NextFunction) => {
-    const now = Date.now();
-    const key = req.ip || req.socket.remoteAddress || "unknown";
-
-    for (const [entryKey, entry] of entries) {
-      if (entry.resetAt <= now) {
-        entries.delete(entryKey);
-      }
-    }
-
-    const existing = entries.get(key);
-    if (!existing || existing.resetAt <= now) {
-      entries.set(key, {
-        count: 1,
-        resetAt: now + windowMs,
-      });
-      next();
-      return;
-    }
-
-    existing.count += 1;
-    if (existing.count > maxRequests) {
-      res
-        .status(429)
-        .set("Retry-After", Math.max(1, Math.ceil((existing.resetAt - now) / 1000)).toString())
-        .json({ error: message });
-      return;
-    }
-
-    next();
-  };
-};
-
-app.use(
-  "/auth",
-  createRateLimit({
-    windowMs: 15 * 60 * 1000,
-    maxRequests: 25,
-    message: "Too many authentication requests. Please try again later.",
-  })
-);
-
-app.use(
-  "/api",
-  createRateLimit({
-    windowMs: 60 * 1000,
-    maxRequests: 120,
-    message: "Too many API requests. Please slow down and try again.",
-  })
-);
+const apiRateLimit = rateLimit({
+  windowMs: 60 * 1000,
+  limit: 120,
+  standardHeaders: "draft-8",
+  legacyHeaders: false,
+  message: { error: "Too many API requests. Please slow down and try again." },
+});
 
 const registerSchema = z.object({
   email: z.email(),
@@ -94,7 +45,7 @@ app.get("/health", (_req, res) => {
   res.json({ ok: true, service: "science-game-api" });
 });
 
-app.post("/auth/register", async (req, res) => {
+app.post("/auth/register", authRateLimit, async (req, res) => {
   const parsed = registerSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: "Invalid payload", details: parsed.error.flatten() });
@@ -155,7 +106,7 @@ app.post("/auth/register", async (req, res) => {
   }
 });
 
-app.post("/auth/login", async (req, res) => {
+app.post("/auth/login", authRateLimit, async (req, res) => {
   const parsed = loginSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: "Invalid payload", details: parsed.error.flatten() });
@@ -209,7 +160,7 @@ app.post("/auth/login", async (req, res) => {
   });
 });
 
-app.get("/auth/me", requireAuth, (req: AuthenticatedRequest, res) => {
+app.get("/auth/me", authRateLimit, requireAuth, (req: AuthenticatedRequest, res) => {
   res.json({ user: req.user });
 });
 
@@ -250,7 +201,7 @@ const attemptSchema = z.object({
   completedMissionIds: z.array(z.string()).optional(),
 });
 
-app.post("/api/attempts", async (req, res) => {
+app.post("/api/attempts", apiRateLimit, async (req, res) => {
   const parsed = attemptSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: "Invalid payload", details: parsed.error.flatten() });
@@ -299,7 +250,7 @@ app.post("/api/attempts", async (req, res) => {
   });
 });
 
-app.get("/api/player/progress", requireAuth, async (req: AuthenticatedRequest, res) => {
+app.get("/api/player/progress", apiRateLimit, requireAuth, async (req: AuthenticatedRequest, res) => {
   const userId = req.user!.sub;
   const progress = await pool.query(
     `
@@ -334,7 +285,7 @@ const progressSchema = z.object({
   completedMissionIds: z.array(z.string()),
 });
 
-app.put("/api/player/progress", requireAuth, async (req: AuthenticatedRequest, res) => {
+app.put("/api/player/progress", apiRateLimit, requireAuth, async (req: AuthenticatedRequest, res) => {
   const parsed = progressSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: "Invalid payload", details: parsed.error.flatten() });
@@ -373,7 +324,7 @@ const assignmentSchema = z.object({
   dueDate: z.string().optional(),
 });
 
-app.get("/api/teacher/classes", requireAuth, requireRole(["teacher", "admin"]), async (req: AuthenticatedRequest, res) => {
+app.get("/api/teacher/classes", apiRateLimit, requireAuth, requireRole(["teacher", "admin"]), async (req: AuthenticatedRequest, res) => {
   const teacherId = req.user!.sub;
 
   const classesResult = await pool.query(
@@ -394,7 +345,7 @@ app.get("/api/teacher/classes", requireAuth, requireRole(["teacher", "admin"]), 
   res.json({ classes: classesResult.rows });
 });
 
-app.post("/api/teacher/classes", requireAuth, requireRole(["teacher", "admin"]), async (req: AuthenticatedRequest, res) => {
+app.post("/api/teacher/classes", apiRateLimit, requireAuth, requireRole(["teacher", "admin"]), async (req: AuthenticatedRequest, res) => {
   const parsed = classSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: "Invalid payload", details: parsed.error.flatten() });
@@ -413,7 +364,7 @@ app.post("/api/teacher/classes", requireAuth, requireRole(["teacher", "admin"]),
   res.status(201).json({ classroom: created.rows[0] });
 });
 
-app.post("/api/teacher/enroll", requireAuth, requireRole(["teacher", "admin"]), async (req: AuthenticatedRequest, res) => {
+app.post("/api/teacher/enroll", apiRateLimit, requireAuth, requireRole(["teacher", "admin"]), async (req: AuthenticatedRequest, res) => {
   const parsed = enrollmentSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: "Invalid payload", details: parsed.error.flatten() });
@@ -453,7 +404,7 @@ app.post("/api/teacher/enroll", requireAuth, requireRole(["teacher", "admin"]), 
   res.json({ ok: true });
 });
 
-app.post("/api/teacher/assignments", requireAuth, requireRole(["teacher", "admin"]), async (req: AuthenticatedRequest, res) => {
+app.post("/api/teacher/assignments", apiRateLimit, requireAuth, requireRole(["teacher", "admin"]), async (req: AuthenticatedRequest, res) => {
   const parsed = assignmentSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: "Invalid payload", details: parsed.error.flatten() });
@@ -486,7 +437,7 @@ app.post("/api/teacher/assignments", requireAuth, requireRole(["teacher", "admin
   res.status(201).json({ assignment: created.rows[0] });
 });
 
-app.get("/api/teacher/classes/:classId/report", requireAuth, requireRole(["teacher", "admin"]), async (req: AuthenticatedRequest, res) => {
+app.get("/api/teacher/classes/:classId/report", apiRateLimit, requireAuth, requireRole(["teacher", "admin"]), async (req: AuthenticatedRequest, res) => {
   const classId = Number(req.params.classId);
   if (!Number.isInteger(classId) || classId <= 0) {
     res.status(400).json({ error: "Invalid class id" });
@@ -547,7 +498,7 @@ const parentGoalSchema = z.object({
   dueDate: z.string().optional(),
 });
 
-app.post("/api/parent/link", requireAuth, requireRole(["parent", "admin"]), async (req: AuthenticatedRequest, res) => {
+app.post("/api/parent/link", apiRateLimit, requireAuth, requireRole(["parent", "admin"]), async (req: AuthenticatedRequest, res) => {
   const parsed = parentLinkSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: "Invalid payload", details: parsed.error.flatten() });
@@ -578,7 +529,7 @@ app.post("/api/parent/link", requireAuth, requireRole(["parent", "admin"]), asyn
   res.json({ ok: true, studentId });
 });
 
-app.get("/api/parent/students", requireAuth, requireRole(["parent", "admin"]), async (req: AuthenticatedRequest, res) => {
+app.get("/api/parent/students", apiRateLimit, requireAuth, requireRole(["parent", "admin"]), async (req: AuthenticatedRequest, res) => {
   const studentsResult = await pool.query(
     `
     SELECT u.id,
@@ -608,7 +559,7 @@ app.get("/api/parent/students", requireAuth, requireRole(["parent", "admin"]), a
   res.json({ students: studentsResult.rows, goals: goalsResult.rows });
 });
 
-app.post("/api/parent/goals", requireAuth, requireRole(["parent", "admin"]), async (req: AuthenticatedRequest, res) => {
+app.post("/api/parent/goals", apiRateLimit, requireAuth, requireRole(["parent", "admin"]), async (req: AuthenticatedRequest, res) => {
   const parsed = parentGoalSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: "Invalid payload", details: parsed.error.flatten() });
@@ -649,7 +600,7 @@ app.post("/api/parent/goals", requireAuth, requireRole(["parent", "admin"]), asy
   res.status(201).json({ goal: created.rows[0] });
 });
 
-app.patch("/api/parent/goals/:goalId/complete", requireAuth, requireRole(["parent", "admin"]), async (req: AuthenticatedRequest, res) => {
+app.patch("/api/parent/goals/:goalId/complete", apiRateLimit, requireAuth, requireRole(["parent", "admin"]), async (req: AuthenticatedRequest, res) => {
   const goalId = Number(req.params.goalId);
   if (!Number.isInteger(goalId) || goalId <= 0) {
     res.status(400).json({ error: "Invalid goal id" });
