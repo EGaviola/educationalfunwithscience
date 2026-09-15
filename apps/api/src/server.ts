@@ -1,7 +1,7 @@
 import bcrypt from "bcryptjs";
 import cors from "cors";
 import "dotenv/config";
-import express from "express";
+import express, { type NextFunction, type Request, type Response } from "express";
 import { z } from "zod";
 import { AuthenticatedRequest, requireAuth, requireRole, signToken, type UserRole } from "./auth.js";
 import { labs, missions, standards } from "./content.js";
@@ -12,6 +12,71 @@ const port = Number(process.env.PORT ?? 4000);
 
 app.use(cors());
 app.use(express.json());
+
+type RateLimitConfig = {
+  windowMs: number;
+  maxRequests: number;
+  message: string;
+};
+
+type RateLimitEntry = {
+  count: number;
+  resetAt: number;
+};
+
+const createRateLimit = ({ windowMs, maxRequests, message }: RateLimitConfig) => {
+  const entries = new Map<string, RateLimitEntry>();
+
+  return (req: Request, res: Response, next: NextFunction) => {
+    const now = Date.now();
+    const key = req.ip || req.socket.remoteAddress || "unknown";
+
+    for (const [entryKey, entry] of entries) {
+      if (entry.resetAt <= now) {
+        entries.delete(entryKey);
+      }
+    }
+
+    const existing = entries.get(key);
+    if (!existing || existing.resetAt <= now) {
+      entries.set(key, {
+        count: 1,
+        resetAt: now + windowMs,
+      });
+      next();
+      return;
+    }
+
+    existing.count += 1;
+    if (existing.count > maxRequests) {
+      res
+        .status(429)
+        .set("Retry-After", Math.max(1, Math.ceil((existing.resetAt - now) / 1000)).toString())
+        .json({ error: message });
+      return;
+    }
+
+    next();
+  };
+};
+
+app.use(
+  "/auth",
+  createRateLimit({
+    windowMs: 15 * 60 * 1000,
+    maxRequests: 25,
+    message: "Too many authentication requests. Please try again later.",
+  })
+);
+
+app.use(
+  "/api",
+  createRateLimit({
+    windowMs: 60 * 1000,
+    maxRequests: 120,
+    message: "Too many API requests. Please slow down and try again.",
+  })
+);
 
 const registerSchema = z.object({
   email: z.email(),
