@@ -339,10 +339,14 @@ function App() {
       if (!hasHydratedSave || !hasLoadedCloudProgress) {
         return
       }
-      await apiFetch('/api/player/progress', {
-        method: 'PUT',
-        body: JSON.stringify({ totalXp, completedMissionIds }),
-      })
+      try {
+        await apiFetch('/api/player/progress', {
+          method: 'PUT',
+          body: JSON.stringify({ totalXp, completedMissionIds }),
+        })
+      } catch {
+        return
+      }
     }
     syncCloudProgress()
   }, [completedMissionIds, hasHydratedSave, hasLoadedCloudProgress, totalXp, user?.sub])
