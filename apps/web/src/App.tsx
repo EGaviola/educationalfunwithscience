@@ -5,6 +5,7 @@ import EscapeRoomGame from './EscapeRoomGame'
 import ResearchMissionGame from './ResearchMissionGame'
 import MiniGamePlay from './MiniGamePlay'
 import ScenarioGame from './ScenarioGame'
+import { fallbackLabs, fallbackMissions } from './fallbackContent'
 
 type Lab = {
   id: string
@@ -22,6 +23,9 @@ type Mission = {
   prompt: string
   scenario: string
   choices: string[]
+  answerIndex: number
+  explanation: string
+  xp: number
   isBoss?: boolean
 }
 
@@ -155,6 +159,11 @@ function App() {
   const [goalTitle, setGoalTitle] = useState('')
   const [goalTargetXp, setGoalTargetXp] = useState<number>(400)
   const [goalTargetMissions, setGoalTargetMissions] = useState<number>(4)
+  const [isApiAvailable, setIsApiAvailable] = useState(true)
+  const [hasHydratedAuth, setHasHydratedAuth] = useState(false)
+  const [hasHydratedSave, setHasHydratedSave] = useState(false)
+  const [hasHydratedExtraSave, setHasHydratedExtraSave] = useState(false)
+  const [hasLoadedCloudProgress, setHasLoadedCloudProgress] = useState(false)
 
   const apiFetch = async (path: string, init?: RequestInit) => {
     const headers = new Headers(init?.headers)
@@ -180,6 +189,7 @@ function App() {
         localStorage.removeItem(AUTH_KEY)
       }
     }
+    setHasHydratedAuth(true)
 
     const saved = localStorage.getItem(SAVE_KEY)
     if (saved) {
@@ -192,6 +202,7 @@ function App() {
         localStorage.removeItem(SAVE_KEY)
       }
     }
+    setHasHydratedSave(true)
 
     const savedExtra = localStorage.getItem(EXTRA_SAVE_KEY)
     if (savedExtra) {
@@ -204,6 +215,7 @@ function App() {
         localStorage.removeItem(EXTRA_SAVE_KEY)
       }
     }
+    setHasHydratedExtraSave(true)
   }, [])
 
   useEffect(() => {
@@ -220,12 +232,15 @@ function App() {
         const missionsPayload = (await missionsResponse.json()) as { missions: Mission[] }
         setLabs(labsPayload.labs)
         setMissions(missionsPayload.missions)
-        if (labsPayload.labs.length > 0) {
-          setSelectedLabId(labsPayload.labs[0].id)
-        }
+        setSelectedLabId((current) => current || labsPayload.labs[0]?.id || '')
+        setIsApiAvailable(true)
         setStatus('Mission control ready')
       } catch {
-        setStatus('API offline. Start apps/api first.')
+        setLabs(fallbackLabs)
+        setMissions(fallbackMissions)
+        setSelectedLabId((current) => current || fallbackLabs[0]?.id || '')
+        setIsApiAvailable(false)
+        setStatus('Offline mode: local missions loaded. Start apps/api for accounts and cloud save.')
       }
     }
 
@@ -238,57 +253,80 @@ function App() {
         setUser(null)
         return
       }
-      const response = await apiFetch('/auth/me')
-      if (!response.ok) {
-        setToken('')
-        localStorage.removeItem(AUTH_KEY)
+      try {
+        const response = await apiFetch('/auth/me')
+        if (response.status === 401) {
+          setToken('')
+          localStorage.removeItem(AUTH_KEY)
+          setUser(null)
+          return
+        }
+        if (!response.ok) {
+          setUser(null)
+          return
+        }
+        const payload = (await response.json()) as { user: AuthUser }
+        setUser(payload.user)
+        setPlayerName(payload.user.displayName)
+      } catch {
         setUser(null)
-        return
       }
-      const payload = (await response.json()) as { user: AuthUser }
-      setUser(payload.user)
-      setPlayerName(payload.user.displayName)
     }
 
     resolveMe()
   }, [token])
 
   useEffect(() => {
+    if (!hasHydratedSave) {
+      return
+    }
     const save: SaveState = {
       playerName,
       totalXp,
       completedMissionIds,
     }
     localStorage.setItem(SAVE_KEY, JSON.stringify(save))
-  }, [playerName, totalXp, completedMissionIds])
+  }, [completedMissionIds, hasHydratedSave, playerName, totalXp])
 
   useEffect(() => {
+    if (!hasHydratedExtraSave) {
+      return
+    }
     const extra: ExtraSaveState = { escapedRoomIds, completedResearchIds, completedScenarioIds }
     localStorage.setItem(EXTRA_SAVE_KEY, JSON.stringify(extra))
-  }, [escapedRoomIds, completedResearchIds, completedScenarioIds])
+  }, [completedResearchIds, completedScenarioIds, escapedRoomIds, hasHydratedExtraSave])
 
   useEffect(() => {
+    if (!hasHydratedAuth) {
+      return
+    }
     if (!token) {
+      localStorage.removeItem(AUTH_KEY)
       return
     }
     localStorage.setItem(AUTH_KEY, JSON.stringify({ token }))
-  }, [token])
+  }, [hasHydratedAuth, token])
 
   useEffect(() => {
     const pullCloudProgress = async () => {
       if (!user || (user.role !== 'student' && user.role !== 'admin')) {
+        setHasLoadedCloudProgress(false)
         return
       }
-      const response = await apiFetch('/api/player/progress')
-      if (!response.ok) {
-        return
+      try {
+        const response = await apiFetch('/api/player/progress')
+        if (!response.ok) {
+          return
+        }
+        const payload = (await response.json()) as {
+          totalXp: number
+          completedMissionIds: string[]
+        }
+        setTotalXp((current) => Math.max(current, payload.totalXp))
+        setCompletedMissionIds((current) => Array.from(new Set([...current, ...payload.completedMissionIds])))
+      } finally {
+        setHasLoadedCloudProgress(true)
       }
-      const payload = (await response.json()) as {
-        totalXp: number
-        completedMissionIds: string[]
-      }
-      setTotalXp(payload.totalXp)
-      setCompletedMissionIds(payload.completedMissionIds)
     }
     pullCloudProgress()
   }, [user?.sub])
@@ -298,13 +336,32 @@ function App() {
       if (!user || (user.role !== 'student' && user.role !== 'admin')) {
         return
       }
-      await apiFetch('/api/player/progress', {
-        method: 'PUT',
-        body: JSON.stringify({ totalXp, completedMissionIds }),
-      })
+      if (!hasHydratedSave || !hasLoadedCloudProgress) {
+        return
+      }
+      try {
+        await apiFetch('/api/player/progress', {
+          method: 'PUT',
+          body: JSON.stringify({ totalXp, completedMissionIds }),
+        })
+      } catch {
+        return
+      }
     }
     syncCloudProgress()
-  }, [totalXp, completedMissionIds, user?.sub])
+  }, [completedMissionIds, hasHydratedSave, hasLoadedCloudProgress, totalXp, user?.sub])
+
+  useEffect(() => {
+    if (!labs.length) {
+      return
+    }
+    setSelectedLabId((current) => {
+      if (current && labs.some((lab) => lab.id === current)) {
+        return current
+      }
+      return labs[0]?.id ?? ''
+    })
+  }, [labs])
 
   const selectedLab = useMemo(
     () => labs.find((lab) => lab.id === selectedLabId) ?? null,
@@ -357,30 +414,49 @@ function App() {
     [missions, selectedMissionId],
   )
 
+  const scoreAttempt = (mission: Mission, selectedIndex: number, secondsSpent: number): AttemptResult => {
+    const isCorrect = selectedIndex === mission.answerIndex
+    const speedBonus = secondsSpent > 0 && secondsSpent < 30 ? 20 : 0
+    return {
+      result: isCorrect ? 'correct' : 'incorrect',
+      xpEarned: isCorrect ? mission.xp + speedBonus : 10,
+      explanation: mission.explanation,
+      standards: mission.standardCodes,
+    }
+  }
+
   const submitAttempt = async () => {
     if (!selectedMission || selectedChoice === null) {
       return
     }
 
     const secondsSpent = Math.max(1, Math.floor((Date.now() - missionStartedAt) / 1000))
-    const response = await apiFetch('/api/attempts', {
-      method: 'POST',
-      body: JSON.stringify({
-        missionId: selectedMission.id,
-        selectedIndex: selectedChoice,
-        secondsSpent,
-        userId: user?.sub,
-        totalXp,
-        completedMissionIds,
-      }),
-    })
+    let payload = scoreAttempt(selectedMission, selectedChoice, secondsSpent)
+    let savedLocally = !isApiAvailable
 
-    if (!response.ok) {
-      setStatus('Attempt failed. Confirm API is running.')
-      return
+    try {
+      const response = await apiFetch('/api/attempts', {
+        method: 'POST',
+        body: JSON.stringify({
+          missionId: selectedMission.id,
+          selectedIndex: selectedChoice,
+          secondsSpent,
+          userId: user?.sub,
+          totalXp,
+          completedMissionIds,
+        }),
+      })
+
+      if (response.ok) {
+        payload = (await response.json()) as AttemptResult
+        setIsApiAvailable(true)
+        savedLocally = false
+      } else {
+        setIsApiAvailable(false)
+      }
+    } catch {
+      setIsApiAvailable(false)
     }
-
-    const payload = (await response.json()) as AttemptResult
     setResult(payload)
 
     const firstClear = payload.result === 'correct' && !completedMissionIds.includes(selectedMission.id)
@@ -391,11 +467,11 @@ function App() {
     }
 
     setTotalXp((current) => current + xpAwarded)
-    setStatus(
+    const successMessage =
       payload.result === 'correct'
         ? `Great work, ${playerName}. Correct prediction! +${xpAwarded} XP`
-        : 'Keep iterating. Review explanation and retry.',
-    )
+        : 'Keep iterating. Review explanation and retry.'
+    setStatus(savedLocally ? `${successMessage} Progress saved locally.` : successMessage)
   }
 
   const switchMission = (missionId: string) => {
