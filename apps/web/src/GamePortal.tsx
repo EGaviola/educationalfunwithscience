@@ -88,13 +88,18 @@ export default function GamePortal({
             <p>{seasonal.description}</p>
           </div>
         </div>
-        <div className="event-card weekly">
+        <button
+          type="button"
+          className="event-card weekly"
+          onClick={() => onSelect('mini-games')}
+          aria-label={`Play ${weeklyTheme.title}`}
+        >
           <span className="event-emoji">{weeklyTheme.emoji}</span>
           <div>
             <strong>{weeklyTheme.title}</strong>
             <p>{weeklyTheme.description}</p>
           </div>
-        </div>
+        </button>
         <div className="event-card daily" onClick={() => onSelect('mini-games')} style={{ cursor: 'pointer' }}>
           <span className="event-emoji">{daily.emoji}</span>
           <div>
