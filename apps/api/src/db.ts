@@ -80,26 +80,6 @@ export async function initializeDatabase(): Promise<void> {
         is_completed BOOLEAN NOT NULL DEFAULT false,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
-
-      -- Foreign-key indexes used by reports, enrollment, and progress queries.
-      -- The UNIQUE constraint on users.email and primary keys already provide
-      -- indexes for those lookup paths.
-      CREATE INDEX IF NOT EXISTS idx_attempt_logs_user_id
-        ON attempt_logs(user_id);
-      CREATE INDEX IF NOT EXISTS idx_attempt_logs_created_at
-        ON attempt_logs(created_at);
-      CREATE INDEX IF NOT EXISTS idx_classrooms_teacher_id
-        ON classrooms(teacher_id);
-      CREATE INDEX IF NOT EXISTS idx_class_enrollments_student_id
-        ON class_enrollments(student_id);
-      CREATE INDEX IF NOT EXISTS idx_assignments_class_id
-        ON assignments(class_id);
-      CREATE INDEX IF NOT EXISTS idx_parent_student_links_student_id
-        ON parent_student_links(student_id);
-      CREATE INDEX IF NOT EXISTS idx_parent_goals_parent_id
-        ON parent_goals(parent_id);
-      CREATE INDEX IF NOT EXISTS idx_parent_goals_student_id
-        ON parent_goals(student_id);
     `);
   } finally {
     client.release();
